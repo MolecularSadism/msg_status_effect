@@ -11,8 +11,8 @@ categories = ["game-development"]
 readme = "README.md"
 
 [dependencies]
-bevy = { version = "0.16", default-features = false, features = ["bevy_log"] }
-bevy_enum_event = "0.1.0"
+bevy = { version = "0.17", default-features = false, features = ["bevy_log"] }
+bevy_enum_event = "0.2"
 serde = { version = "1.0", features = ["derive"] }
 
 [lints.rust]

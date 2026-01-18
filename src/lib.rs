@@ -43,20 +43,22 @@
 //!
 //! // Apply effects in a system (example usage)
 //! fn apply_speed_boost(mut commands: Commands, entity: Entity) {
-//!     commands.trigger_targets(
-//!         ApplyStatusEffect(SpeedModifier(ValueModifier::Percent(50.0))),
-//!         entity
-//!     );
+//!     commands.trigger(ApplyStatusEffect {
+//!         effect: SpeedModifier(ValueModifier::Percent(50.0)),
+//!         entity,
+//!     });
 //! }
 //! ```
 
 use std::marker::PhantomData;
 
 use bevy::ecs::component::Mutable;
+use bevy::ecs::observer::On;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 pub mod prelude {
+    pub use bevy::ecs::observer::On;
     pub use bevy_enum_event::EnumEvent;
 
     pub use crate::{
@@ -406,26 +408,28 @@ pub trait StatusEffectApplicator<C: MutableComponent>: Event + Clone {
 /// #[derive(Event, Clone, Copy)]
 /// struct SpeedModifier(ValueModifier);
 ///
-/// // Create the wrapped effect event
-/// let effect = ApplyStatusEffect(SpeedModifier(ValueModifier::Percent(50.0)));
-///
 /// // In a system, you would trigger it like this:
 /// fn apply_speed_boost(mut commands: Commands, entity: Entity) {
-///     commands.trigger_targets(
-///         ApplyStatusEffect(SpeedModifier(ValueModifier::Percent(50.0))),
+///     commands.trigger(ApplyStatusEffect {
+///         effect: SpeedModifier(ValueModifier::Percent(50.0)),
 ///         entity,
-///     );
+///     });
 /// }
 /// ```
-#[derive(Event, Clone, Copy)]
-pub struct ApplyStatusEffect<E: Event + Clone>(pub E);
+#[derive(EntityEvent, Clone, Copy)]
+pub struct ApplyStatusEffect<E: Event + Clone> {
+    /// The effect to apply
+    pub effect: E,
+    /// The target entity
+    pub entity: Entity,
+}
 
 /// Generic observer that handles any `ApplyStatusEffect<E>` for component C.
 ///
 /// If the target entity doesn't have the component, it will be automatically
 /// inserted with its default value before applying the effect.
 fn apply_status_effect_observer<C, E>(
-    trigger: Trigger<ApplyStatusEffect<E>>,
+    on: On<ApplyStatusEffect<E>>,
     config: Res<StatusEffectApplication<C>>,
     mut q: Query<&mut C>,
     mut commands: Commands,
@@ -433,13 +437,16 @@ fn apply_status_effect_observer<C, E>(
     C: MutableComponent + Default,
     E: Event + Clone + StatusEffectApplicator<C>,
 {
-    let entity = trigger.target();
+    let entity = on.entity;
     if let Ok(mut component) = q.get_mut(entity) {
-        trigger.event().0.apply(&mut component, config.power);
+        on.effect.apply(&mut component, config.power);
     } else if let Ok(mut entity_commands) = commands.get_entity(entity) {
         // Entity exists but missing component - insert default and re-trigger
         entity_commands.insert(C::default());
-        commands.trigger_targets(trigger.event().clone(), entity);
+        commands.trigger(ApplyStatusEffect {
+            effect: on.effect.clone(),
+            entity,
+        });
     }
     // If entity doesn't exist, silently ignore
 }
@@ -567,12 +574,12 @@ pub struct StatusEffectObserverMarker;
 ///
 /// // Observer function for the effect
 /// fn on_apply_speed_modifier(
-///     trigger: Trigger<ApplyStatusEffect<SpeedModifier>>,
+///     on: On<ApplyStatusEffect<SpeedModifier>>,
 ///     mut q_speed: Query<&mut Speed>,
 /// ) {
-///     let entity = trigger.target();
+///     let entity = on.entity;
 ///     if let Ok(mut speed) = q_speed.get_mut(entity) {
-///         trigger.event().0.apply(&mut speed, 1.0);
+///         on.effect.apply(&mut speed, 1.0);
 ///     }
 /// }
 ///
@@ -594,10 +601,12 @@ macro_rules! status_effect_observer {
         // Create marker entity for this observer group
         let marker_name = concat!(stringify!($effect_type), "_observer");
 
-        // Register the observer with a descriptive name
+        // Spawn marker entity for visibility in entity inspectors
         $app.world_mut()
-            .spawn((Name::new(marker_name), $crate::StatusEffectObserverMarker))
-            .observe($observer_fn);
+            .spawn((Name::new(marker_name), $crate::StatusEffectObserverMarker));
+
+        // Register a global observer that responds to the effect on any entity
+        $app.add_observer($observer_fn);
     }};
 }
 
@@ -929,10 +938,10 @@ mod tests {
         app.update();
 
         // Trigger effect
-        app.world_mut().commands().trigger_targets(
-            ApplyStatusEffect(TestSpeedEffect(ValueModifier::Val(20.0))),
+        app.world_mut().commands().trigger(ApplyStatusEffect {
+            effect: TestSpeedEffect(ValueModifier::Val(20.0)),
             entity,
-        );
+        });
 
         app.update();
 
@@ -952,10 +961,10 @@ mod tests {
         app.update();
 
         // Apply +50% effect
-        app.world_mut().commands().trigger_targets(
-            ApplyStatusEffect(TestSpeedEffect(ValueModifier::Percent(50.0))),
+        app.world_mut().commands().trigger(ApplyStatusEffect {
+            effect: TestSpeedEffect(ValueModifier::Percent(50.0)),
             entity,
-        );
+        });
 
         app.update();
 
@@ -976,10 +985,10 @@ mod tests {
         app.update();
 
         // Apply +30 with sqrt scaling: sqrt(40^2 + 30^2) = 50
-        app.world_mut().commands().trigger_targets(
-            ApplyStatusEffect(TestSpeedEffect(ValueModifier::Val(30.0))),
+        app.world_mut().commands().trigger(ApplyStatusEffect {
+            effect: TestSpeedEffect(ValueModifier::Val(30.0)),
             entity,
-        );
+        });
 
         app.update();
 
@@ -1000,10 +1009,10 @@ mod tests {
         app.update();
 
         // Apply +50% with power=0.7: 100 * 1.5^0.7 = ~136.8
-        app.world_mut().commands().trigger_targets(
-            ApplyStatusEffect(TestSpeedEffect(ValueModifier::Percent(50.0))),
+        app.world_mut().commands().trigger(ApplyStatusEffect {
+            effect: TestSpeedEffect(ValueModifier::Percent(50.0)),
             entity,
-        );
+        });
 
         app.update();
 
@@ -1023,18 +1032,18 @@ mod tests {
         app.update();
 
         // Apply first effect: +20
-        app.world_mut().commands().trigger_targets(
-            ApplyStatusEffect(TestSpeedEffect(ValueModifier::Val(20.0))),
+        app.world_mut().commands().trigger(ApplyStatusEffect {
+            effect: TestSpeedEffect(ValueModifier::Val(20.0)),
             entity,
-        );
+        });
 
         app.update();
 
         // Apply second effect: +10%
-        app.world_mut().commands().trigger_targets(
-            ApplyStatusEffect(TestSpeedEffect(ValueModifier::Percent(10.0))),
+        app.world_mut().commands().trigger(ApplyStatusEffect {
+            effect: TestSpeedEffect(ValueModifier::Percent(10.0)),
             entity,
-        );
+        });
 
         app.update();
 
@@ -1052,11 +1061,11 @@ mod tests {
         app.update();
 
         // Trigger effect on entity that doesn't exist
-        let fake_entity = Entity::from_raw(9999);
-        app.world_mut().commands().trigger_targets(
-            ApplyStatusEffect(TestSpeedEffect(ValueModifier::Val(20.0))),
-            fake_entity,
-        );
+        let fake_entity = Entity::from_raw_u32(9999).unwrap();
+        app.world_mut().commands().trigger(ApplyStatusEffect {
+            effect: TestSpeedEffect(ValueModifier::Val(20.0)),
+            entity: fake_entity,
+        });
 
         // Should not panic
         app.update();
@@ -1074,10 +1083,10 @@ mod tests {
         app.update();
 
         // Trigger effect - should auto-insert component and apply effect
-        app.world_mut().commands().trigger_targets(
-            ApplyStatusEffect(TestSpeedEffect(ValueModifier::Val(20.0))),
+        app.world_mut().commands().trigger(ApplyStatusEffect {
+            effect: TestSpeedEffect(ValueModifier::Val(20.0)),
             entity,
-        );
+        });
 
         // First update: observer runs, queues insert + re-trigger
         app.update();
@@ -1102,10 +1111,10 @@ mod tests {
 
         // Trigger percent effect on entity without component
         // Default TestSpeed.value is 0.0, so +50% of 0 = 0
-        app.world_mut().commands().trigger_targets(
-            ApplyStatusEffect(TestSpeedEffect(ValueModifier::Percent(50.0))),
+        app.world_mut().commands().trigger(ApplyStatusEffect {
+            effect: TestSpeedEffect(ValueModifier::Percent(50.0)),
             entity,
-        );
+        });
 
         app.update();
         app.update();
@@ -1150,10 +1159,10 @@ mod tests {
         app.update();
 
         // Apply +50% to entity without component
-        app.world_mut().commands().trigger_targets(
-            ApplyStatusEffect(TestArmorEffect(ValueModifier::Percent(50.0))),
+        app.world_mut().commands().trigger(ApplyStatusEffect {
+            effect: TestArmorEffect(ValueModifier::Percent(50.0)),
             entity,
-        );
+        });
 
         app.update();
         app.update();
@@ -1213,16 +1222,16 @@ mod tests {
         app.update();
 
         // Apply speed effect (linear)
-        app.world_mut().commands().trigger_targets(
-            ApplyStatusEffect(TestSpeedEffect(ValueModifier::Val(20.0))),
+        app.world_mut().commands().trigger(ApplyStatusEffect {
+            effect: TestSpeedEffect(ValueModifier::Val(20.0)),
             entity,
-        );
+        });
 
         // Apply health effect (sqrt scaling)
-        app.world_mut().commands().trigger_targets(
-            ApplyStatusEffect(TestHealthEffect(ValueModifier::Percent(50.0))),
+        app.world_mut().commands().trigger(ApplyStatusEffect {
+            effect: TestHealthEffect(ValueModifier::Percent(50.0)),
             entity,
-        );
+        });
 
         app.update();
 
@@ -1253,13 +1262,13 @@ mod tests {
 
     /// Custom observer function for macro tests
     fn on_macro_test_effect(
-        trigger: Trigger<ApplyStatusEffect<MacroTestEffect>>,
+        on: On<ApplyStatusEffect<MacroTestEffect>>,
         mut q: Query<&mut MacroTestComponent>,
     ) {
-        let entity = trigger.target();
+        let entity = on.entity;
         if let Ok(mut component) = q.get_mut(entity) {
             // Apply with linear scaling for simplicity
-            component.value = trigger.event().0.0.apply_scaled(component.value, 1.0);
+            component.value = on.effect.0.apply_scaled(component.value, 1.0);
         }
     }
 
@@ -1287,10 +1296,10 @@ mod tests {
         assert_eq!(marker_count, 1);
 
         // Trigger effect
-        app.world_mut().commands().trigger_targets(
-            ApplyStatusEffect(MacroTestEffect(ValueModifier::Val(50.0))),
+        app.world_mut().commands().trigger(ApplyStatusEffect {
+            effect: MacroTestEffect(ValueModifier::Val(50.0)),
             entity,
-        );
+        });
 
         app.update();
 
@@ -1309,7 +1318,7 @@ mod tests {
         app.update();
 
         // Find the marker entity and check its name
-        // Uses observer function name (pure snake_case, consistent with fsm_observer!)
+        // The marker is named "{EffectType}_observer"
         let mut found_name = false;
         for (entity, marker) in app
             .world_mut()
@@ -1317,7 +1326,7 @@ mod tests {
             .iter(app.world())
         {
             if let Some(name) = app.world().get::<Name>(entity) {
-                if name.as_str() == "on_macro_test_effect" {
+                if name.as_str() == "MacroTestEffect_observer" {
                     found_name = true;
                 }
             }
@@ -1326,7 +1335,7 @@ mod tests {
 
         assert!(
             found_name,
-            "Expected marker entity with name 'on_macro_test_effect'"
+            "Expected marker entity with name 'MacroTestEffect_observer'"
         );
     }
 
@@ -1348,10 +1357,10 @@ mod tests {
 
         // Apply multiple flat effects with sqrt scaling
         // First: sqrt(100^2 + 60^2) = sqrt(13600) = ~116.62
-        app.world_mut().commands().trigger_targets(
-            ApplyStatusEffect(TestSpeedEffect(ValueModifier::Val(60.0))),
+        app.world_mut().commands().trigger(ApplyStatusEffect {
+            effect: TestSpeedEffect(ValueModifier::Val(60.0)),
             entity,
-        );
+        });
 
         app.update();
 
@@ -1359,10 +1368,10 @@ mod tests {
         assert!((speed.value - 116.62).abs() < 0.1);
 
         // Second: sqrt(116.62^2 + 80^2) = sqrt(20000) = ~141.42
-        app.world_mut().commands().trigger_targets(
-            ApplyStatusEffect(TestSpeedEffect(ValueModifier::Val(80.0))),
+        app.world_mut().commands().trigger(ApplyStatusEffect {
+            effect: TestSpeedEffect(ValueModifier::Val(80.0)),
             entity,
-        );
+        });
 
         app.update();
 
@@ -1381,10 +1390,10 @@ mod tests {
         app.update();
 
         // Apply negative flat effect
-        app.world_mut().commands().trigger_targets(
-            ApplyStatusEffect(TestSpeedEffect(ValueModifier::Val(-30.0))),
+        app.world_mut().commands().trigger(ApplyStatusEffect {
+            effect: TestSpeedEffect(ValueModifier::Val(-30.0)),
             entity,
-        );
+        });
 
         app.update();
 
@@ -1403,10 +1412,10 @@ mod tests {
         app.update();
 
         // Apply -25% effect (slow)
-        app.world_mut().commands().trigger_targets(
-            ApplyStatusEffect(TestSpeedEffect(ValueModifier::Percent(-25.0))),
+        app.world_mut().commands().trigger(ApplyStatusEffect {
+            effect: TestSpeedEffect(ValueModifier::Percent(-25.0)),
             entity,
-        );
+        });
 
         app.update();
 
@@ -1434,10 +1443,10 @@ mod tests {
         // Player picks up two speed buffs (+30% each)
         // With sqrt scaling, these should have diminishing returns
         for _ in 0..2 {
-            app.world_mut().commands().trigger_targets(
-                ApplyStatusEffect(TestSpeedEffect(ValueModifier::Percent(30.0))),
+            app.world_mut().commands().trigger(ApplyStatusEffect {
+                effect: TestSpeedEffect(ValueModifier::Percent(30.0)),
                 entity,
-            );
+            });
             app.update();
         }
 
@@ -1464,10 +1473,10 @@ mod tests {
         app.update();
 
         // Gain +50 max health
-        app.world_mut().commands().trigger_targets(
-            ApplyStatusEffect(TestHealthEffect(ValueModifier::Val(50.0))),
+        app.world_mut().commands().trigger(ApplyStatusEffect {
+            effect: TestHealthEffect(ValueModifier::Val(50.0)),
             entity,
-        );
+        });
 
         app.update();
 
@@ -1493,10 +1502,10 @@ mod tests {
 
         // Apply same effect to all entities
         for entity in [entity1, entity2, entity3] {
-            app.world_mut().commands().trigger_targets(
-                ApplyStatusEffect(TestSpeedEffect(ValueModifier::Percent(25.0))),
+            app.world_mut().commands().trigger(ApplyStatusEffect {
+                effect: TestSpeedEffect(ValueModifier::Percent(25.0)),
                 entity,
-            );
+            });
         }
 
         app.update();
@@ -1504,5 +1513,189 @@ mod tests {
         assert!((app.world().get::<TestSpeed>(entity1).unwrap().value - 125.0).abs() < 0.001);
         assert!((app.world().get::<TestSpeed>(entity2).unwrap().value - 100.0).abs() < 0.001);
         assert!((app.world().get::<TestSpeed>(entity3).unwrap().value - 150.0).abs() < 0.001);
+    }
+
+    // ============================================================================
+    // Bevy 0.17 Migration Tests - New API Verification
+    // ============================================================================
+
+    /// Test that ApplyStatusEffect struct fields are accessible
+    #[test]
+    fn api_apply_status_effect_struct_fields() {
+        let effect = TestSpeedEffect(ValueModifier::Val(10.0));
+        let entity = Entity::from_raw_u32(1).unwrap();
+
+        let apply_event = ApplyStatusEffect { effect, entity };
+
+        // Verify both fields are accessible
+        assert_eq!(apply_event.effect.0, ValueModifier::Val(10.0));
+        assert_eq!(apply_event.entity.to_bits(), entity.to_bits());
+    }
+
+    /// Test that ApplyStatusEffect can be cloned
+    #[test]
+    fn api_apply_status_effect_clone() {
+        let effect = TestSpeedEffect(ValueModifier::Percent(25.0));
+        let entity = Entity::from_raw_u32(42).unwrap();
+
+        let original = ApplyStatusEffect { effect, entity };
+        let cloned = original.clone();
+
+        assert_eq!(original.effect.0, cloned.effect.0);
+        assert_eq!(original.entity.to_bits(), cloned.entity.to_bits());
+    }
+
+    /// Test that ApplyStatusEffect can be copied
+    #[test]
+    fn api_apply_status_effect_copy() {
+        let effect = TestSpeedEffect(ValueModifier::Val(5.0));
+        let entity = Entity::from_raw_u32(100).unwrap();
+
+        let original = ApplyStatusEffect { effect, entity };
+        let copied = original; // Copy, not move
+
+        // Both should be usable after copy
+        assert_eq!(original.effect.0, copied.effect.0);
+    }
+
+    /// Test triggering multiple effects on same entity in single update
+    #[test]
+    fn api_multiple_triggers_same_entity_single_update() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(StatusEffectPlugin::<TestSpeed, TestSpeedEffect>::default());
+
+        let entity = app.world_mut().spawn(TestSpeed::new(100.0)).id();
+
+        app.update();
+
+        // Trigger multiple effects before updating
+        app.world_mut().commands().trigger(ApplyStatusEffect {
+            effect: TestSpeedEffect(ValueModifier::Val(10.0)),
+            entity,
+        });
+        app.world_mut().commands().trigger(ApplyStatusEffect {
+            effect: TestSpeedEffect(ValueModifier::Val(20.0)),
+            entity,
+        });
+        app.world_mut().commands().trigger(ApplyStatusEffect {
+            effect: TestSpeedEffect(ValueModifier::Percent(10.0)),
+            entity,
+        });
+
+        app.update();
+
+        // All effects should be applied: 100 + 10 + 20 = 130, then 130 * 1.1 = 143
+        let speed = app.world().get::<TestSpeed>(entity).unwrap();
+        assert!((speed.value - 143.0).abs() < 0.001);
+    }
+
+    /// Test that world.trigger works directly (not just commands)
+    #[test]
+    fn api_direct_world_trigger() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(StatusEffectPlugin::<TestSpeed, TestSpeedEffect>::default());
+
+        let entity = app.world_mut().spawn(TestSpeed::new(100.0)).id();
+
+        app.update();
+
+        // Use world_mut().trigger directly
+        app.world_mut().trigger(ApplyStatusEffect {
+            effect: TestSpeedEffect(ValueModifier::Val(50.0)),
+            entity,
+        });
+
+        // No app.update() needed - trigger is immediate on world
+
+        let speed = app.world().get::<TestSpeed>(entity).unwrap();
+        assert!((speed.value - 150.0).abs() < 0.001);
+    }
+
+    /// Test On<T> parameter in custom observers
+    #[test]
+    fn api_custom_observer_on_parameter() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+
+        // Define a custom component for this test
+        #[derive(Component)]
+        struct CustomValue(f32);
+
+        #[derive(Event, Clone, Copy)]
+        struct CustomEffect(f32);
+
+        // Custom observer using On<T>
+        fn custom_observer(on: On<ApplyStatusEffect<CustomEffect>>, mut q: Query<&mut CustomValue>) {
+            if let Ok(mut value) = q.get_mut(on.entity) {
+                value.0 += on.effect.0;
+            }
+        }
+
+        // Register the custom observer
+        app.add_observer(custom_observer);
+
+        let entity = app.world_mut().spawn(CustomValue(10.0)).id();
+
+        app.update();
+
+        app.world_mut().trigger(ApplyStatusEffect {
+            effect: CustomEffect(5.0),
+            entity,
+        });
+
+        let value = app.world().get::<CustomValue>(entity).unwrap();
+        assert!((value.0 - 15.0).abs() < 0.001);
+    }
+
+    /// Test that despawned entities don't cause panics
+    #[test]
+    fn api_despawned_entity_safety() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(StatusEffectPlugin::<TestSpeed, TestSpeedEffect>::default());
+
+        let entity = app.world_mut().spawn(TestSpeed::new(100.0)).id();
+
+        app.update();
+
+        // Despawn the entity
+        app.world_mut().despawn(entity);
+
+        app.update();
+
+        // Try to trigger effect on despawned entity - should not panic
+        app.world_mut().commands().trigger(ApplyStatusEffect {
+            effect: TestSpeedEffect(ValueModifier::Val(20.0)),
+            entity,
+        });
+
+        // Should not panic
+        app.update();
+    }
+
+    /// Test EntityEvent derivation is working (entity targeting)
+    #[test]
+    fn api_entity_event_targeting() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(StatusEffectPlugin::<TestSpeed, TestSpeedEffect>::default());
+
+        // Create two entities
+        let entity1 = app.world_mut().spawn(TestSpeed::new(100.0)).id();
+        let entity2 = app.world_mut().spawn(TestSpeed::new(200.0)).id();
+
+        app.update();
+
+        // Trigger effect only on entity1
+        app.world_mut().trigger(ApplyStatusEffect {
+            effect: TestSpeedEffect(ValueModifier::Val(50.0)),
+            entity: entity1,
+        });
+
+        // entity1 should be affected, entity2 should not
+        assert!((app.world().get::<TestSpeed>(entity1).unwrap().value - 150.0).abs() < 0.001);
+        assert!((app.world().get::<TestSpeed>(entity2).unwrap().value - 200.0).abs() < 0.001);
     }
 }
