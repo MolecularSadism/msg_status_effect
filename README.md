@@ -18,8 +18,8 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-msg_status_effect = "0.1"
-bevy = "0.16"
+msg_status_effect = { git = "https://github.com/MolecularSadism/msg_status_effect", tag = "v0.2.0" }
+bevy = "0.17"
 ```
 
 ## Quick Start
@@ -254,6 +254,7 @@ impl<C, E> StatusEffectPlugin<C, E> {
 
 | `msg_status_effect` | Bevy |
 |---------------------|------|
+| 0.2                 | 0.17 |
 | 0.1                 | 0.16 |
 
 ## License
