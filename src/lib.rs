@@ -440,15 +440,15 @@ fn apply_status_effect_observer<C, E>(
     let entity = on.entity;
     if let Ok(mut component) = q.get_mut(entity) {
         on.effect.apply(&mut component, config.power);
-    } else if let Ok(mut entity_commands) = commands.get_entity(entity) {
-        // Entity exists but missing component - insert default and re-trigger
+    } else if let Ok(mut entity_commands) = commands.get_spawned_entity(entity) {
+        // Entity is spawned but missing component - insert default and re-trigger
         entity_commands.insert(C::default());
         commands.trigger(ApplyStatusEffect {
             effect: on.effect.clone(),
             entity,
         });
     }
-    // If entity doesn't exist, silently ignore
+    // If entity doesn't exist or isn't spawned yet, silently ignore
 }
 
 /// Plugin for registering a status effect for a specific component.
@@ -1516,7 +1516,7 @@ mod tests {
     }
 
     // ============================================================================
-    // Bevy 0.17 Migration Tests - New API Verification
+    // API Verification Tests
     // ============================================================================
 
     /// Test that ApplyStatusEffect struct fields are accessible

@@ -134,7 +134,7 @@ fn setup(mut commands: Commands) {
     // Initialize demo state
     commands.insert_resource(DemoState::default());
 
-    println!("=== msg_status_effect Bevy 0.17 Example ===\n");
+    println!("=== msg_status_effect Example ===\n");
     println!("Initial state:");
     println!("  Speed: 100.0");
     println!("  Health: 80/100 (80%)\n");

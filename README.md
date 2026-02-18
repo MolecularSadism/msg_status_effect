@@ -18,8 +18,8 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-msg_status_effect = { git = "https://github.com/MolecularSadism/msg_status_effect", tag = "v0.2.0" }
-bevy = "0.17"
+msg_status_effect = { git = "https://github.com/MolecularSadism/msg_status_effect", tag = "v0.3.0" }
+bevy = "0.18"
 ```
 
 ## Quick Start
@@ -52,11 +52,13 @@ fn plugin(app: &mut App) {
 }
 
 // Apply effects using triggers
-fn apply_speed_boost(mut commands: Commands, entity: Entity) {
-    commands.trigger_targets(
-        ApplyStatusEffect(SpeedModifier(ValueModifier::Percent(50.0))),
-        entity
-    );
+fn apply_speed_boost(mut commands: Commands, query: Query<Entity, With<Speed>>) {
+    if let Ok(entity) = query.single() {
+        commands.trigger(ApplyStatusEffect {
+            effect: SpeedModifier(ValueModifier::Percent(50.0)),
+            entity,
+        });
+    }
 }
 ```
 
@@ -140,13 +142,13 @@ For custom effect handling, use the `status_effect_observer!` macro:
 
 ```rust
 fn on_apply_speed(
-    trigger: Trigger<ApplyStatusEffect<SpeedModifier>>,
+    on: On<ApplyStatusEffect<SpeedModifier>>,
     mut q_speed: Query<&mut Speed>,
 ) {
-    let entity = trigger.target();
+    let entity = on.entity;
     if let Ok(mut speed) = q_speed.get_mut(entity) {
         // Custom logic
-        trigger.event().0.apply(&mut speed, 1.0);
+        on.effect.0.apply(&mut speed, 1.0);
     }
 }
 
@@ -201,16 +203,16 @@ fn plugin(app: &mut App) {
 
 fn apply_buffs(mut commands: Commands, player: Entity) {
     // Increase max health by 50
-    commands.trigger_targets(
-        ApplyStatusEffect(HealthModifier(ValueModifier::Val(50.0))),
-        player
-    );
+    commands.trigger(ApplyStatusEffect {
+        effect: HealthModifier(ValueModifier::Val(50.0)),
+        entity: player,
+    });
 
     // Increase speed by 30% (with diminishing returns)
-    commands.trigger_targets(
-        ApplyStatusEffect(SpeedModifier(ValueModifier::Percent(30.0))),
-        player
-    );
+    commands.trigger(ApplyStatusEffect {
+        effect: SpeedModifier(ValueModifier::Percent(30.0)),
+        entity: player,
+    });
 }
 ```
 
@@ -254,8 +256,23 @@ impl<C, E> StatusEffectPlugin<C, E> {
 
 | `msg_status_effect` | Bevy |
 |---------------------|------|
+| 0.3                 | 0.18 |
 | 0.2                 | 0.17 |
 | 0.1                 | 0.16 |
+
+## Migration Guide
+
+### 0.2 → 0.3 (Bevy 0.17 → 0.18)
+
+**No breaking API changes for users of this crate.** The internals now use `commands.get_spawned_entity()` instead of `commands.get_entity()` for the auto-insert behavior, which aligns with Bevy 0.18's stricter entity state checking. This means attempting to apply an effect to an entity that has been reserved via `commands.spawn()` but not yet flushed will silently do nothing — the same as targeting a non-existent entity.
+
+**Observer parameter type** remains `On<T>` (unchanged from Bevy 0.17).
+
+### 0.1 → 0.2 (Bevy 0.16 → 0.17)
+
+- Observer parameter changed from `Trigger<T>` to `On<T>`
+- `trigger.target()` → `on.entity`
+- `trigger.event()` → direct field access via `on.field_name` (through `Deref`)
 
 ## License
 
