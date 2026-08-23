@@ -14,13 +14,13 @@
 //! - [`StatusHold`] — the hold's data: its release condition, an optional
 //!   host-defined restore payload (the state to return to), and the runtime
 //!   timer for timed holds.
-//! - [`should_overwrite_release_condition`] / [`next_status_hold`] — the
+//! - [`ReleaseCondition::overwritten_by`] / [`StatusHold::next`] — the
 //!   stacking rules for how a re-application interacts with a running hold.
 //! - [`TimedStatus`] — trait linking a hold component to its milestone and
 //!   restore types; gives it [`tick_timed_status`] and [`release_hold`].
 //! - [`TimerStatusEffect`] + [`DurationModifier`] — scale a running hold's
-//!   timer through the crate's [`StatusEffectApplicator`] machinery (a
-//!   resistance perk shortening stuns, say).
+//!   timer (a resistance perk shortening stuns, say), registered through
+//!   [`DurationModifierPlugin`] so unheld entities stay untouched.
 //! - [`StatusReleased`] — entity event fired whenever a hold is released, so
 //!   the host decides what release *does* (restore a movement state, replay an
 //!   animation) instead of this module hardcoding it.
@@ -38,7 +38,10 @@ use std::time::Duration;
 
 use bevy::prelude::*;
 
-use crate::{MutableComponent, StatusEffectApplicator, ValueModifier};
+use crate::{
+    ApplyStatusEffect, MutableComponent, StatusEffectApplication, StatusEffectApplicator,
+    ValueModifier,
+};
 
 // ============================================================================
 // Release Conditions & Stacking
@@ -60,43 +63,46 @@ pub enum ReleaseCondition<M = ()> {
     Milestone(M),
 }
 
-/// Determines if a new [`ReleaseCondition`] should overwrite an existing one.
-///
-/// Stacking rules:
-/// - `Permanent` always wins (never overwrite; always overwrites)
-/// - `Time` vs `Time`: overwrite only if the new duration is longer
-/// - Milestone conditions don't overwrite timers or `Permanent`; timers
-///   overwrite milestone conditions
-/// - Between milestones: the stricter (greater) one wins; equal doesn't
-///   overwrite
-///
-/// Returns true if the new condition should overwrite the existing one.
-#[must_use]
-pub fn should_overwrite_release_condition<M: Ord>(
-    existing: &ReleaseCondition<M>,
-    new: &ReleaseCondition<M>,
-) -> bool {
-    match (existing, new) {
-        // Permanent never gets overwritten
-        (ReleaseCondition::Permanent, _) => false,
+impl<M: Ord> ReleaseCondition<M> {
+    /// Whether an incoming condition should overwrite this (the existing)
+    /// one when a status is re-applied.
+    ///
+    /// Stacking rules:
+    /// - `Permanent` always wins (never overwritten; always overwrites)
+    /// - `Time` vs `Time`: overwrite only if the new duration is strictly
+    ///   longer — re-applying an *equal* duration deliberately never
+    ///   refreshes a running hold
+    /// - Milestone conditions don't overwrite timers or `Permanent`; timers
+    ///   overwrite milestone conditions
+    /// - Between milestones: the stricter (greater) one wins; equal doesn't
+    ///   overwrite
+    ///
+    /// `Time` vs `Time` compares the two release conditions, so a hold whose
+    /// duration changes while it runs (a [`DurationModifier`], say) must keep
+    /// its `release` in sync with its timer — [`StatusHold::set_duration`]
+    /// does exactly that.
+    ///
+    /// Returns true if `new` should overwrite this condition.
+    #[must_use]
+    pub fn overwritten_by(&self, new: &Self) -> bool {
+        match (self, new) {
+            // Permanent never gets overwritten
+            (Self::Permanent, _) => false,
 
-        // Overwrite with Permanent
-        (_, ReleaseCondition::Permanent) => true,
+            // Overwrite with Permanent
+            (_, Self::Permanent) => true,
 
-        // Time vs Time: overwrite if new has longer duration
-        (ReleaseCondition::Time(existing_dur), ReleaseCondition::Time(new_dur)) => {
-            new_dur > existing_dur
-        }
+            // Time vs Time: overwrite if new has longer duration
+            (Self::Time(existing_dur), Self::Time(new_dur)) => new_dur > existing_dur,
 
-        // Timer vs milestone: timer wins (don't overwrite timer with milestone)
-        (ReleaseCondition::Time(_), _) => false,
+            // Timer vs milestone: timer wins (don't overwrite timer with milestone)
+            (Self::Time(_), _) => false,
 
-        // Milestone vs timer: timer wins (overwrite milestone with timer)
-        (_, ReleaseCondition::Time(_)) => true,
+            // Milestone vs timer: timer wins (overwrite milestone with timer)
+            (_, Self::Time(_)) => true,
 
-        // Milestone vs milestone: strictest condition wins
-        (ReleaseCondition::Milestone(existing_m), ReleaseCondition::Milestone(new_m)) => {
-            new_m > existing_m
+            // Milestone vs milestone: strictest condition wins
+            (Self::Milestone(existing_m), Self::Milestone(new_m)) => new_m > existing_m,
         }
     }
 }
@@ -141,6 +147,26 @@ impl<M, S> Default for StatusHold<M, S> {
     }
 }
 
+impl<M, S> StatusHold<M, S> {
+    /// Rewrites this hold to lift after `duration`, keeping [`release`] and
+    /// [`timer`] consistent: the release condition becomes
+    /// [`ReleaseCondition::Time`] with the new duration and the countdown
+    /// restarts from it.
+    ///
+    /// Use this instead of writing the two fields independently whenever a
+    /// running hold's duration changes ([`DurationModifier`] does), so that
+    /// stacking decisions — which compare release conditions, see
+    /// [`ReleaseCondition::overwritten_by`] — judge against the live duration
+    /// rather than the originally applied one.
+    ///
+    /// [`release`]: Self::release
+    /// [`timer`]: Self::timer
+    pub fn set_duration(&mut self, duration: Duration) {
+        self.release = ReleaseCondition::Time(duration);
+        self.timer = Some(Timer::new(duration, TimerMode::Once));
+    }
+}
+
 impl<M: Ord, S> StatusHold<M, S> {
     /// Whether an occurred milestone satisfies this hold's release condition.
     ///
@@ -152,46 +178,50 @@ impl<M: Ord, S> StatusHold<M, S> {
     pub fn released_by(&self, milestone: &M) -> bool {
         matches!(&self.release, ReleaseCondition::Milestone(required) if milestone >= required)
     }
-}
 
-/// Builds the hold to write for an incoming status application, or `None` if
-/// an existing hold outranks the incoming one (see
-/// [`should_overwrite_release_condition`]) and nothing should change.
-///
-/// `existing` is `None` when the entity is not currently held — with
-/// presence-as-state that is exactly "the component is absent", which is also
-/// what makes the application a fresh activation.
-///
-/// The original `previous_state` is preserved across a stack-up; the
-/// `current_state` fallback is only used when there was no hold to inherit it
-/// from (otherwise a fresh read of the live state — which is the *held* state
-/// by then — would clobber the state to restore).
-#[must_use]
-pub fn next_status_hold<M: Ord + Clone, S: Clone>(
-    existing: Option<&StatusHold<M, S>>,
-    release: &ReleaseCondition<M>,
-    current_state: Option<S>,
-) -> Option<StatusHold<M, S>> {
-    if let Some(existing) = existing
-        && !should_overwrite_release_condition(&existing.release, release)
+    /// Builds the hold to write for an incoming status application, or `None`
+    /// if an existing hold outranks the incoming one (see
+    /// [`ReleaseCondition::overwritten_by`]) and nothing should change.
+    ///
+    /// `existing` is `None` when the entity is not currently held — with
+    /// presence-as-state that is exactly "the component is absent", which is
+    /// also what makes the application a fresh activation.
+    ///
+    /// The original `previous_state` is preserved across a stack-up; the
+    /// `current_state` fallback is only used when there was no hold to inherit
+    /// it from (otherwise a fresh read of the live state — which is the *held*
+    /// state by then — would clobber the state to restore).
+    #[must_use]
+    pub fn next(
+        existing: Option<&Self>,
+        release: &ReleaseCondition<M>,
+        current_state: Option<S>,
+    ) -> Option<Self>
+    where
+        M: Clone,
+        S: Clone,
     {
-        return None;
+        if let Some(existing) = existing
+            && !existing.release.overwritten_by(release)
+        {
+            return None;
+        }
+
+        let previous_state = existing
+            .and_then(|h| h.previous_state.clone())
+            .or(current_state);
+
+        let timer = match release {
+            ReleaseCondition::Time(dur) => Some(Timer::new(*dur, TimerMode::Once)),
+            _ => None,
+        };
+
+        Some(Self {
+            release: release.clone(),
+            previous_state,
+            timer,
+        })
     }
-
-    let previous_state = existing
-        .and_then(|h| h.previous_state.clone())
-        .or(current_state);
-
-    let timer = match release {
-        ReleaseCondition::Time(dur) => Some(Timer::new(*dur, TimerMode::Once)),
-        _ => None,
-    };
-
-    Some(StatusHold {
-        release: release.clone(),
-        previous_state,
-        timer,
-    })
 }
 
 // ============================================================================
@@ -245,34 +275,48 @@ impl<C: TimedStatus> StatusReleased<C> {
 /// Callable from any host system that decides a hold should lift (a milestone
 /// report, a cleanse effect); the timer path calls it from
 /// [`tick_timed_status`].
+///
+/// Removal and announcement happen together when the queued command applies:
+/// [`StatusReleased`] fires only if the component was actually still present,
+/// so release paths racing within one frame (a timer expiry plus a host
+/// cleanse, say) announce a single release.
 pub fn release_hold<C: TimedStatus>(
     commands: &mut Commands,
     entity: Entity,
     previous_state: Option<C::Restore>,
 ) {
-    commands.entity(entity).try_remove::<C>();
-    commands.trigger(StatusReleased::<C>::new(entity, previous_state));
+    commands.queue(move |world: &mut World| {
+        let taken = world
+            .get_entity_mut(entity)
+            .ok()
+            .and_then(|mut entity_mut| entity_mut.take::<C>());
+        if taken.is_some() {
+            world.trigger(StatusReleased::<C>::new(entity, previous_state));
+        }
+    });
 }
 
 /// Ticks the timer of every active hold `C` and releases finished ones.
 ///
 /// Only actually-held entities carry the component, so this iterates the held
 /// set rather than every entity. Holds without a timer (permanent or
-/// milestone-released) are left alone.
+/// milestone-released) are detected through an immutable read and skipped, so
+/// they are never spuriously marked `Changed<C>`; timed holds are necessarily
+/// marked changed each tick as their countdown advances.
 pub fn tick_timed_status<C: TimedStatus>(
     mut commands: Commands,
     time: Res<Time>,
     mut q_held: Query<(Entity, &mut C)>,
 ) {
     for (entity, mut held) in q_held.iter_mut() {
-        let finished = match held.hold_mut().timer.as_mut() {
-            Some(timer) => {
-                timer.tick(time.delta());
-                timer.just_finished()
-            }
-            None => false,
+        if held.hold().timer.is_none() {
+            continue;
+        }
+        let Some(timer) = held.hold_mut().timer.as_mut() else {
+            continue;
         };
-        if finished {
+        timer.tick(time.delta());
+        if timer.just_finished() {
             let previous_state = held.hold().previous_state.clone();
             release_hold::<C>(&mut commands, entity, previous_state);
         }
@@ -307,13 +351,23 @@ impl<C: TimedStatus> Plugin for TimedStatusPlugin<C> {
 
 /// Trait for components that hold a scalable runtime [`Timer`].
 ///
-/// Implementing this gives you a [`DurationModifier<C>`] event for free that
-/// integrates with the status effect system for scaling timer durations.
-/// [`TimedStatus`] implementors satisfy it by returning
-/// `self.hold_mut().timer.as_mut()`.
-pub trait TimerStatusEffect: MutableComponent + Default + Clone {
+/// Implementing this gives you a [`DurationModifier<C>`] event for free,
+/// registered through [`DurationModifierPlugin`], that scales the timer's
+/// remaining duration. [`TimedStatus`] implementors satisfy it by returning
+/// `self.hold_mut().timer.as_mut()` from [`timer_mut`] and forwarding
+/// [`set_duration`] to [`StatusHold::set_duration`], which keeps the hold's
+/// release condition in sync with the rewritten timer.
+///
+/// [`timer_mut`]: Self::timer_mut
+/// [`set_duration`]: Self::set_duration
+pub trait TimerStatusEffect: MutableComponent {
     /// Returns a mutable reference to the runtime timer (if present).
     fn timer_mut(&mut self) -> Option<&mut Timer>;
+
+    /// Replaces the runtime countdown so `duration` remains, updating any
+    /// bookkeeping that mirrors the timer (a [`StatusHold`]'s release
+    /// condition, say) so later stacking decisions see the changed duration.
+    fn set_duration(&mut self, duration: Duration);
 }
 
 /// Generic duration modifier that scales the [`Timer`] inside any
@@ -321,25 +375,32 @@ pub trait TimerStatusEffect: MutableComponent + Default + Clone {
 ///
 /// Reusable for any hold with a runtime countdown. The modifier is applied to
 /// the timer's *remaining* duration using the power parameter for scaling
-/// based on perk level or item count.
+/// based on perk level or item count. Register it with
+/// [`DurationModifierPlugin`].
 ///
 /// # Example
 ///
 /// ```rust
+/// use std::time::Duration;
+///
 /// use bevy::prelude::*;
 /// use msg_status_effect::prelude::*;
 ///
-/// #[derive(Component, Default, Clone)]
+/// #[derive(Component)]
 /// struct Rooted(StatusHold);
 ///
 /// impl TimerStatusEffect for Rooted {
 ///     fn timer_mut(&mut self) -> Option<&mut Timer> {
 ///         self.0.timer.as_mut()
 ///     }
+///
+///     fn set_duration(&mut self, duration: Duration) {
+///         self.0.set_duration(duration);
+///     }
 /// }
 ///
 /// fn plugin(app: &mut App) {
-///     app.add_plugins(StatusEffectPlugin::<Rooted, DurationModifier<Rooted>>::default());
+///     app.add_plugins(DurationModifierPlugin::<Rooted>::default());
 /// }
 ///
 /// // Shorten a running root by 20%:
@@ -350,12 +411,30 @@ pub trait TimerStatusEffect: MutableComponent + Default + Clone {
 ///     });
 /// }
 /// ```
-#[derive(Event, Debug, Clone, Copy)]
+#[derive(Event)]
 pub struct DurationModifier<C: TimerStatusEffect> {
     /// How to change the timer's remaining duration.
     pub modifier: ValueModifier,
     _marker: PhantomData<C>,
 }
+
+// Manual impls so `C` need not implement Debug/Clone/Copy itself (a derive
+// would add those bounds through the PhantomData field).
+impl<C: TimerStatusEffect> std::fmt::Debug for DurationModifier<C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DurationModifier")
+            .field("modifier", &self.modifier)
+            .finish()
+    }
+}
+
+impl<C: TimerStatusEffect> Clone for DurationModifier<C> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<C: TimerStatusEffect> Copy for DurationModifier<C> {}
 
 impl<C: TimerStatusEffect> DurationModifier<C> {
     /// Creates a new `DurationModifier` with the given [`ValueModifier`].
@@ -374,15 +453,66 @@ impl<C: TimerStatusEffect> StatusEffectApplicator<C> for DurationModifier<C> {
     }
 
     fn apply(&self, component: &mut C, power: f32) {
-        if let Some(timer) = component.timer_mut() {
-            let current_ms = timer.remaining().as_millis() as f32;
-            let new_ms = self
-                .modifier
-                .apply_scaled(current_ms, power)
-                .max(0.0)
-                .round();
-            *timer = Timer::from_seconds(new_ms / 1000.0, TimerMode::Once);
+        let Some(timer) = component.timer_mut() else {
+            return;
+        };
+        let current_ms = timer.remaining().as_millis() as f32;
+        let new_ms = self
+            .modifier
+            .apply_scaled(current_ms, power)
+            .max(0.0)
+            .round();
+        component.set_duration(Duration::from_millis(new_ms as u64));
+    }
+}
+
+/// Registers [`DurationModifier<C>`] handling for a [`TimerStatusEffect`]
+/// component, with the given [`StatusEffectApplication`] power scaling.
+///
+/// Unlike [`StatusEffectPlugin`], the registered observer never inserts `C`:
+/// a duration modifier only means anything against a hold that is already
+/// running, and under presence-as-state semantics inserting a default hold
+/// would *hold* the entity. Targeting an entity that does not carry `C` is
+/// therefore a no-op.
+///
+/// [`StatusEffectPlugin`]: crate::StatusEffectPlugin
+pub struct DurationModifierPlugin<C: TimerStatusEffect> {
+    config: StatusEffectApplication<C>,
+}
+
+impl<C: TimerStatusEffect> Default for DurationModifierPlugin<C> {
+    fn default() -> Self {
+        Self {
+            config: StatusEffectApplication::default(),
         }
+    }
+}
+
+impl<C: TimerStatusEffect> DurationModifierPlugin<C> {
+    /// Creates the plugin with the specified scaling configuration.
+    #[must_use]
+    pub fn new(config: StatusEffectApplication<C>) -> Self {
+        Self { config }
+    }
+}
+
+impl<C: TimerStatusEffect> Plugin for DurationModifierPlugin<C> {
+    fn build(&self, app: &mut App) {
+        app.insert_resource(StatusEffectApplication::<C>::with_power(self.config.power));
+        app.add_observer(apply_duration_modifier::<C>);
+    }
+}
+
+/// Observer applying [`DurationModifier<C>`] strictly to entities that
+/// currently carry `C`; unheld entities are left untouched (see
+/// [`DurationModifierPlugin`]).
+fn apply_duration_modifier<C: TimerStatusEffect>(
+    on: On<ApplyStatusEffect<DurationModifier<C>>>,
+    config: Res<StatusEffectApplication<C>>,
+    mut q: Query<&mut C>,
+) {
+    if let Ok(mut component) = q.get_mut(on.entity) {
+        on.effect.apply(&mut component, config.power);
     }
 }
 
@@ -393,7 +523,7 @@ impl<C: TimerStatusEffect> StatusEffectApplicator<C> for DurationModifier<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ApplyStatusEffect, StatusEffectPlugin};
+    use crate::ApplyStatusEffect;
     use bevy::ecs::system::RunSystemOnce;
 
     /// Dummy milestone type: ordering encodes strictness, mirroring an
@@ -416,7 +546,9 @@ mod tests {
     type TestCondition = ReleaseCondition<TestMilestone>;
 
     /// Dummy hold component, standing in for a host's stun/snare.
-    #[derive(Component, Default, Clone)]
+    /// Deliberately neither `Default` nor `Clone`: the machinery must not
+    /// require either.
+    #[derive(Component)]
     struct Held(TestHold);
 
     impl TimedStatus for Held {
@@ -436,92 +568,98 @@ mod tests {
         fn timer_mut(&mut self) -> Option<&mut Timer> {
             self.0.timer.as_mut()
         }
+
+        fn set_duration(&mut self, duration: Duration) {
+            self.0.set_duration(duration);
+        }
     }
 
     // -------------------------------------------------------------------
-    // should_overwrite_release_condition — stacking comparator
+    // ReleaseCondition::overwritten_by — stacking comparator
     // -------------------------------------------------------------------
 
     #[test]
-    fn should_overwrite_permanent_never_overwritten() {
+    fn overwritten_by_permanent_never_overwritten() {
         let permanent = TestCondition::Permanent;
         let timed = TestCondition::Time(Duration::from_secs(5));
         let cycle = TestCondition::Milestone(TestMilestone::CycleFinished);
         let finished = TestCondition::Milestone(TestMilestone::Finished);
 
-        assert!(!should_overwrite_release_condition(&permanent, &timed));
-        assert!(!should_overwrite_release_condition(&permanent, &cycle));
-        assert!(!should_overwrite_release_condition(&permanent, &finished));
-        assert!(!should_overwrite_release_condition(&permanent, &permanent));
+        assert!(!permanent.overwritten_by(&timed));
+        assert!(!permanent.overwritten_by(&cycle));
+        assert!(!permanent.overwritten_by(&finished));
+        assert!(!permanent.overwritten_by(&permanent));
     }
 
     #[test]
-    fn should_overwrite_permanent_always_wins() {
+    fn overwritten_by_permanent_always_wins() {
         let permanent = TestCondition::Permanent;
         let timed = TestCondition::Time(Duration::from_secs(5));
         let cycle = TestCondition::Milestone(TestMilestone::CycleFinished);
         let finished = TestCondition::Milestone(TestMilestone::Finished);
 
-        assert!(should_overwrite_release_condition(&timed, &permanent));
-        assert!(should_overwrite_release_condition(&cycle, &permanent));
-        assert!(should_overwrite_release_condition(&finished, &permanent));
+        assert!(timed.overwritten_by(&permanent));
+        assert!(cycle.overwritten_by(&permanent));
+        assert!(finished.overwritten_by(&permanent));
     }
 
     #[test]
-    fn should_overwrite_timer_duration_comparison() {
+    fn overwritten_by_timer_duration_comparison() {
         let short = TestCondition::Time(Duration::from_secs(2));
         let long = TestCondition::Time(Duration::from_secs(5));
 
         // Longer duration should overwrite shorter
-        assert!(should_overwrite_release_condition(&short, &long));
+        assert!(short.overwritten_by(&long));
         // Shorter duration should not overwrite longer
-        assert!(!should_overwrite_release_condition(&long, &short));
+        assert!(!long.overwritten_by(&short));
+        // Equal duration deliberately never refreshes
+        assert!(!short.overwritten_by(&short));
     }
 
     #[test]
-    fn should_overwrite_timer_beats_milestone() {
+    fn overwritten_by_timer_beats_milestone() {
         let timed = TestCondition::Time(Duration::from_secs(1));
         let changed = TestCondition::Milestone(TestMilestone::Changed);
         let cycle = TestCondition::Milestone(TestMilestone::CycleFinished);
         let finished = TestCondition::Milestone(TestMilestone::Finished);
 
         // Timer should overwrite milestone conditions
-        assert!(should_overwrite_release_condition(&changed, &timed));
-        assert!(should_overwrite_release_condition(&cycle, &timed));
-        assert!(should_overwrite_release_condition(&finished, &timed));
+        assert!(changed.overwritten_by(&timed));
+        assert!(cycle.overwritten_by(&timed));
+        assert!(finished.overwritten_by(&timed));
 
         // Milestone conditions should not overwrite timer
-        assert!(!should_overwrite_release_condition(&timed, &changed));
-        assert!(!should_overwrite_release_condition(&timed, &cycle));
-        assert!(!should_overwrite_release_condition(&timed, &finished));
+        assert!(!timed.overwritten_by(&changed));
+        assert!(!timed.overwritten_by(&cycle));
+        assert!(!timed.overwritten_by(&finished));
     }
 
     #[test]
-    fn should_overwrite_milestone_strictness_order() {
+    fn overwritten_by_milestone_strictness_order() {
         let changed = TestCondition::Milestone(TestMilestone::Changed);
         let cycle = TestCondition::Milestone(TestMilestone::CycleFinished);
         let finished = TestCondition::Milestone(TestMilestone::Finished);
 
         // Finished (strictest) beats both others
-        assert!(should_overwrite_release_condition(&cycle, &finished));
-        assert!(should_overwrite_release_condition(&changed, &finished));
-        assert!(!should_overwrite_release_condition(&finished, &cycle));
-        assert!(!should_overwrite_release_condition(&finished, &changed));
+        assert!(cycle.overwritten_by(&finished));
+        assert!(changed.overwritten_by(&finished));
+        assert!(!finished.overwritten_by(&cycle));
+        assert!(!finished.overwritten_by(&changed));
 
         // CycleFinished beats Changed
-        assert!(should_overwrite_release_condition(&changed, &cycle));
-        assert!(!should_overwrite_release_condition(&cycle, &changed));
+        assert!(changed.overwritten_by(&cycle));
+        assert!(!cycle.overwritten_by(&changed));
     }
 
     #[test]
-    fn should_overwrite_same_milestone_condition() {
+    fn overwritten_by_same_milestone_condition() {
         for milestone in [
             TestMilestone::Changed,
             TestMilestone::CycleFinished,
             TestMilestone::Finished,
         ] {
             let condition = TestCondition::Milestone(milestone);
-            assert!(!should_overwrite_release_condition(&condition, &condition));
+            assert!(!condition.overwritten_by(&condition));
         }
     }
 
@@ -563,12 +701,12 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // next_status_hold — stacking rules against the presence-as-state shape
+    // StatusHold::next — stacking rules against the presence-as-state shape
     // -------------------------------------------------------------------
 
     #[test]
-    fn next_status_hold_activates_when_absent() {
-        let hold = next_status_hold(
+    fn next_activates_when_absent() {
+        let hold = TestHold::next(
             None,
             &TestCondition::Time(Duration::from_secs(2)),
             Some(TestRestore::JumpAndRun),
@@ -579,7 +717,7 @@ mod tests {
     }
 
     #[test]
-    fn next_status_hold_stacks_longer_duration_without_losing_previous_state() {
+    fn next_stacks_longer_duration_without_losing_previous_state() {
         let existing = TestHold {
             release: TestCondition::Time(Duration::from_secs(1)),
             previous_state: Some(TestRestore::Fly),
@@ -587,7 +725,7 @@ mod tests {
         };
         // A fresh read of the live state (which is the held state by now)
         // must not clobber the original previous_state.
-        let hold = next_status_hold(
+        let hold = TestHold::next(
             Some(&existing),
             &TestCondition::Time(Duration::from_secs(5)),
             Some(TestRestore::JumpAndRun),
@@ -602,14 +740,14 @@ mod tests {
     }
 
     #[test]
-    fn next_status_hold_skips_shorter_duration() {
+    fn next_skips_shorter_duration() {
         let existing = TestHold {
             release: TestCondition::Time(Duration::from_secs(5)),
             previous_state: None,
             timer: Some(Timer::new(Duration::from_secs(5), TimerMode::Once)),
         };
         assert!(
-            next_status_hold(
+            TestHold::next(
                 Some(&existing),
                 &TestCondition::Time(Duration::from_secs(1)),
                 None,
@@ -650,7 +788,7 @@ mod tests {
             "an unheld entity carries no component, so Without<Held> excludes nothing"
         );
 
-        let hold = next_status_hold(
+        let hold = TestHold::next(
             None,
             &TestCondition::Time(Duration::from_secs(1)),
             Some(TestRestore::JumpAndRun),
@@ -715,6 +853,56 @@ mod tests {
     }
 
     #[test]
+    fn tick_leaves_untimed_holds_unmarked() {
+        let mut app = tick_app();
+
+        let permanent = app
+            .world_mut()
+            .spawn(Held(TestHold {
+                release: TestCondition::Permanent,
+                ..Default::default()
+            }))
+            .id();
+        let milestone = app
+            .world_mut()
+            .spawn(Held(TestHold {
+                release: TestCondition::Milestone(TestMilestone::Finished),
+                ..Default::default()
+            }))
+            .id();
+        let timed = app
+            .world_mut()
+            .spawn(Held(TestHold {
+                release: TestCondition::Time(Duration::from_secs(10)),
+                previous_state: None,
+                timer: Some(Timer::new(Duration::from_secs(10), TimerMode::Once)),
+            }))
+            .id();
+
+        app.update();
+        app.world_mut().clear_trackers();
+
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_millis(100));
+        app.world_mut()
+            .run_system_once(tick_timed_status::<Held>)
+            .unwrap();
+
+        let changed: Vec<Entity> = app
+            .world_mut()
+            .query_filtered::<Entity, Changed<Held>>()
+            .iter(app.world())
+            .collect();
+        assert_eq!(
+            changed,
+            vec![timed],
+            "only the ticking timed hold is marked changed, \
+             not the permanent ({permanent}) or milestone ({milestone}) holds"
+        );
+    }
+
+    #[test]
     fn release_hold_announces_from_host_systems_too() {
         let mut app = tick_app();
         let entity = app
@@ -745,6 +933,75 @@ mod tests {
         );
     }
 
+    #[test]
+    fn racing_releases_announce_once() {
+        let mut app = tick_app();
+        let entity = app
+            .world_mut()
+            .spawn(Held(TestHold {
+                release: TestCondition::Milestone(TestMilestone::Finished),
+                previous_state: Some(TestRestore::Fly),
+                timer: None,
+            }))
+            .id();
+
+        // Two release paths race in the same frame: both see the still-present
+        // component and both queue a release.
+        app.world_mut()
+            .run_system_once(move |mut commands: Commands| {
+                release_hold::<Held>(&mut commands, entity, Some(TestRestore::Fly));
+                release_hold::<Held>(&mut commands, entity, Some(TestRestore::Fly));
+            })
+            .unwrap();
+        app.update();
+
+        assert!(app.world().get::<Held>(entity).is_none());
+        assert_eq!(
+            app.world().resource::<Releases>().0,
+            vec![(entity, Some(TestRestore::Fly))],
+            "only the release that actually removed the component announces"
+        );
+    }
+
+    #[test]
+    fn timed_status_plugin_releases_through_fixed_update() {
+        use bevy::time::TimeUpdateStrategy;
+
+        let mut app = tick_app();
+        app.add_plugins(TimedStatusPlugin::<Held>::default());
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            50,
+        )));
+
+        let entity = app
+            .world_mut()
+            .spawn(Held(
+                TestHold::next(
+                    None,
+                    &TestCondition::Time(Duration::from_millis(120)),
+                    Some(TestRestore::JumpAndRun),
+                )
+                .unwrap(),
+            ))
+            .id();
+        assert!(app.world().get::<Held>(entity).is_some());
+
+        // Each update advances virtual time by 50ms; well past the 120ms hold
+        // after a handful of frames' worth of FixedUpdate runs.
+        for _ in 0..10 {
+            app.update();
+        }
+
+        assert!(
+            app.world().get::<Held>(entity).is_none(),
+            "the plugin's FixedUpdate registration drives the tick to release"
+        );
+        assert_eq!(
+            app.world().resource::<Releases>().0,
+            vec![(entity, Some(TestRestore::JumpAndRun))]
+        );
+    }
+
     // -------------------------------------------------------------------
     // DurationModifier through the StatusEffectApplicator machinery
     // -------------------------------------------------------------------
@@ -753,17 +1010,12 @@ mod tests {
     fn duration_modifier_scales_remaining_time() {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
-        app.add_plugins(StatusEffectPlugin::<Held, DurationModifier<Held>>::default());
+        app.add_plugins(DurationModifierPlugin::<Held>::default());
 
         let entity = app
             .world_mut()
             .spawn(Held(
-                next_status_hold(
-                    None,
-                    &TestCondition::Time(Duration::from_secs(10)),
-                    None::<TestRestore>,
-                )
-                .unwrap(),
+                TestHold::next(None, &TestCondition::Time(Duration::from_secs(10)), None).unwrap(),
             ))
             .id();
 
@@ -783,6 +1035,85 @@ mod tests {
         assert!(
             (remaining.as_secs_f32() - 5.0).abs() < 0.01,
             "expected ~5s remaining, got {remaining:?}"
+        );
+    }
+
+    #[test]
+    fn duration_modifier_ignores_unheld_entities() {
+        let mut app = tick_app();
+        app.add_plugins(DurationModifierPlugin::<Held>::default());
+
+        let entity = app.world_mut().spawn_empty().id();
+        app.update();
+
+        app.world_mut()
+            .run_system_once(move |mut commands: Commands| {
+                commands.trigger(ApplyStatusEffect {
+                    entity,
+                    effect: DurationModifier::<Held>::new(ValueModifier::Percent(-50.0)),
+                });
+            })
+            .unwrap();
+        app.update();
+        app.update();
+
+        assert!(
+            app.world().get::<Held>(entity).is_none(),
+            "a duration modifier must not insert a default (permanent) hold"
+        );
+        assert!(
+            app.world().resource::<Releases>().0.is_empty(),
+            "nothing was held, so nothing releases"
+        );
+    }
+
+    #[test]
+    fn duration_modifier_keeps_release_condition_in_sync_for_stacking() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(DurationModifierPlugin::<Held>::default());
+
+        let entity = app
+            .world_mut()
+            .spawn(Held(
+                TestHold::next(None, &TestCondition::Time(Duration::from_secs(10)), None).unwrap(),
+            ))
+            .id();
+
+        app.world_mut()
+            .run_system_once(move |mut commands: Commands| {
+                commands.trigger(ApplyStatusEffect {
+                    entity,
+                    effect: DurationModifier::<Held>::new(ValueModifier::Percent(-50.0)),
+                });
+            })
+            .unwrap();
+        app.update();
+
+        let held = app.world().get::<Held>(entity).unwrap();
+        assert_eq!(
+            held.hold().release,
+            TestCondition::Time(Duration::from_secs(5)),
+            "the release condition tracks the modified timer"
+        );
+
+        // Stacking judges against the modified duration, not the nominal 10s:
+        // a 6s re-application now lands, a 4s one still doesn't.
+        assert!(
+            TestHold::next(
+                Some(held.hold()),
+                &TestCondition::Time(Duration::from_secs(6)),
+                None,
+            )
+            .is_some()
+        );
+        assert!(
+            TestHold::next(
+                Some(held.hold()),
+                &TestCondition::Time(Duration::from_secs(4)),
+                None,
+            )
+            .is_none()
         );
     }
 
