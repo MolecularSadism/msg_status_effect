@@ -18,7 +18,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-msg_status_effect = { git = "https://github.com/MolecularSadism/msg_status_effect", tag = "v0.3.0" }
+msg_status_effect = { git = "https://github.com/MolecularSadism/msg_status_effect", tag = "v0.4.0" }
 bevy = "0.18"
 ```
 
@@ -157,6 +157,129 @@ fn plugin(app: &mut App) {
 }
 ```
 
+## Timed Status Holds
+
+The `timed` module (re-exported from the prelude) generalizes *presence-as-state* status holds:
+components an entity carries **only while actually held** — a stun, a snare, a root — so hot
+queries exclude held entities with `Without<C>` instead of fetching and branching. It layers on
+top of the same [`StatusEffectApplicator`]/[`ValueModifier`] abstractions as the rest of the crate.
+
+What the module owns, and what stays in your game:
+
+| Concern | Owned by the module | Stays in your game |
+|---------|---------------------|--------------------|
+| When a hold lifts | `ReleaseCondition<M>`: `Permanent` / `Time(Duration)` / `Milestone(M)` | the milestone type `M` (an `Ord` enum) and whatever reports it |
+| Hold data | `StatusHold<M, S>`: release condition, optional restore payload `S`, runtime timer | what the restore payload *means* |
+| Stacking | `ReleaseCondition::overwritten_by` + `StatusHold::next` | — |
+| Ticking timed holds | `TimedStatus` + `tick_timed_status` + `TimedStatusPlugin<C>` | the concrete hold component |
+| Releasing | `release_hold::<C>()` drops the component and fires `StatusReleased<C>` | observers deciding what release *does* |
+| Duration scaling | `TimerStatusEffect` + `DurationModifier<C>` + `DurationModifierPlugin<C>` | which perk/item triggers it |
+
+### Release conditions and milestones
+
+`ReleaseCondition<M>` is generic over a host-defined milestone type `M` — an `Ord` enum whose
+ordering encodes *strictness*. A stricter milestone (greater) satisfies a hold waiting on a laxer
+one, so `StatusHold::released_by(reported)` is true when `reported >= required`:
+
+```rust
+use msg_status_effect::prelude::*;
+use std::time::Duration;
+
+#[derive(Reflect, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum AnimationMilestone { Changed, CycleFinished, Finished }
+
+// Waiting on CycleFinished: a Finished report (stricter) releases it, a Changed one does not.
+let hold: StatusHold<AnimationMilestone, ()> = StatusHold {
+    release: ReleaseCondition::Milestone(AnimationMilestone::CycleFinished),
+    ..Default::default()
+};
+assert!(hold.released_by(&AnimationMilestone::Finished));
+assert!(!hold.released_by(&AnimationMilestone::Changed));
+
+// Hosts with no milestones use the default `()`.
+let timed: StatusHold = StatusHold {
+    release: ReleaseCondition::Time(Duration::from_secs(2)),
+    ..Default::default()
+};
+assert!(!timed.released_by(&()));
+```
+
+### Stacking
+
+`StatusHold::next(existing, incoming, current_state)` decides whether a re-application lands.
+`overwritten_by` ranks conditions: `Permanent` always wins; a strictly longer `Time` wins (an
+equal duration never refreshes); timers beat milestones both directions; a stricter milestone
+wins. A fresh activation (`existing == None`, i.e. the component is absent) always lands and
+captures `current_state`; a stack-up keeps the original restore payload rather than re-reading the
+now-held live state.
+
+### Ticking and the release seam
+
+Add one `TimedStatusPlugin<C>` per hold component to tick its timer in `FixedUpdate` (or call
+`tick_timed_status::<C>` yourself to place it in a custom set). When a timer finishes — or when any
+host system decides a hold should lift — `release_hold::<C>()` removes the component and fires the
+`StatusReleased<C> { entity, previous_state }` entity event. What release *does* is entirely up to
+your observers: restore an FSM state, replay an animation, nothing at all. Racing release paths in
+one frame announce a single release.
+
+```rust
+use bevy::prelude::*;
+use msg_status_effect::prelude::*;
+use std::time::Duration;
+
+#[derive(Component)]
+struct Rooted(StatusHold);
+
+impl TimedStatus for Rooted {
+    type Milestone = ();
+    type Restore = ();
+    fn hold(&self) -> &StatusHold { &self.0 }
+    fn hold_mut(&mut self) -> &mut StatusHold { &mut self.0 }
+}
+
+fn plugin(app: &mut App) {
+    app.add_plugins(TimedStatusPlugin::<Rooted>::default());
+    app.add_observer(|on: On<StatusReleased<Rooted>>| {
+        // React to the root lifting.
+        let _ = on.entity;
+    });
+}
+```
+
+### Duration scaling
+
+A hold with a runtime timer implements `TimerStatusEffect` to earn a `DurationModifier<C>` for
+free, registered through `DurationModifierPlugin<C>`. It scales the hold's *remaining* time through
+the same `ApplyStatusEffect`/power-scaling machinery — a resistance perk that shortens roots, say —
+and, unlike `StatusEffectPlugin`, never inserts a component: scaling an entity that is not held is
+a no-op instead of a spurious permanent hold.
+
+```rust
+use bevy::prelude::*;
+use msg_status_effect::prelude::*;
+use std::time::Duration;
+
+#[derive(Component)]
+struct Rooted(StatusHold);
+
+impl TimerStatusEffect for Rooted {
+    fn timer_mut(&mut self) -> Option<&mut Timer> { self.0.timer.as_mut() }
+    fn set_duration(&mut self, duration: Duration) { self.0.set_duration(duration); }
+}
+
+fn plugin(app: &mut App) {
+    app.add_plugins(DurationModifierPlugin::<Rooted>::default());
+}
+
+// Shorten a running root by 20%:
+fn apply_resistance(mut commands: Commands, entity: Entity) {
+    commands.trigger(ApplyStatusEffect {
+        entity,
+        effect: DurationModifier::<Rooted>::new(ValueModifier::Percent(-20.0)),
+    });
+}
+```
+
 ## Complete Example
 
 ```rust
@@ -256,11 +379,19 @@ impl<C, E> StatusEffectPlugin<C, E> {
 
 | `msg_status_effect` | Bevy |
 |---------------------|------|
+| 0.4                 | 0.18 |
 | 0.3                 | 0.18 |
 | 0.2                 | 0.17 |
 | 0.1                 | 0.16 |
 
 ## Migration Guide
+
+### 0.3 → 0.4 (additive)
+
+**No breaking API changes.** 0.4 adds the [`timed`](#timed-status-holds) module for
+presence-as-state status *holds* (stuns, snares, roots) that lift on a release condition, with
+stacking rules, an observable release seam, and reusable duration scaling. Everything from 0.3
+is unchanged; a project that does not use `timed` needs no edits.
 
 ### 0.2 → 0.3 (Bevy 0.17 → 0.18)
 
