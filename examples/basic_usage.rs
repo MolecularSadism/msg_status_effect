@@ -154,7 +154,10 @@ fn apply_effects_demo(
     match state.frame {
         // Frame 2: Apply a +50% speed buff
         2 => {
-            println!("Frame {}: Applying +50% speed buff (sqrt scaling)", state.frame);
+            println!(
+                "Frame {}: Applying +50% speed buff (sqrt scaling)",
+                state.frame
+            );
             commands.trigger(ApplyStatusEffect {
                 effect: SpeedModifier(ValueModifier::Percent(50.0)),
                 entity,
@@ -162,10 +165,7 @@ fn apply_effects_demo(
         }
         // Frame 4: Apply another +50% speed buff (demonstrates diminishing returns)
         4 => {
-            println!(
-                "Frame {}: Current speed: {:.2}",
-                state.frame, speed.value
-            );
+            println!("Frame {}: Current speed: {:.2}", state.frame, speed.value);
             println!("Frame {}: Applying another +50% speed buff", state.frame);
             commands.trigger(ApplyStatusEffect {
                 effect: SpeedModifier(ValueModifier::Percent(50.0)),
@@ -178,11 +178,16 @@ fn apply_effects_demo(
                 "Frame {}: Speed after two +50% buffs: {:.2}",
                 state.frame, speed.value
             );
-            println!("  (With linear scaling it would be 225.0, but sqrt gives diminishing returns)\n");
+            println!(
+                "  (With linear scaling it would be 225.0, but sqrt gives diminishing returns)\n"
+            );
         }
         // Frame 8: Apply +30 flat speed
         8 => {
-            println!("Frame {}: Applying +30 flat speed (sqrt scaling)", state.frame);
+            println!(
+                "Frame {}: Applying +30 flat speed (sqrt scaling)",
+                state.frame
+            );
             commands.trigger(ApplyStatusEffect {
                 effect: SpeedModifier(ValueModifier::Val(30.0)),
                 entity,
@@ -196,7 +201,10 @@ fn apply_effects_demo(
             );
             println!("  (Uses Pythagorean addition: sqrt(current^2 + 30^2))\n");
 
-            println!("Frame {}: Applying +50 max health (linear scaling)", state.frame);
+            println!(
+                "Frame {}: Applying +50 max health (linear scaling)",
+                state.frame
+            );
             commands.trigger(ApplyStatusEffect {
                 effect: MaxHealthModifier(ValueModifier::Val(50.0)),
                 entity,

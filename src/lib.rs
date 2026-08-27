@@ -57,6 +57,8 @@ use bevy::ecs::observer::On;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
+pub mod timed;
+
 pub mod prelude {
     pub use bevy::ecs::observer::On;
     pub use bevy_enum_event::EnumEvent;
@@ -64,6 +66,10 @@ pub mod prelude {
     pub use crate::{
         ApplyStatusEffect, MutableComponent, StatusEffectApplication, StatusEffectApplicator,
         StatusEffectPlugin, ValueModifier, scaling, status_effect_observer,
+        timed::{
+            DurationModifier, DurationModifierPlugin, ReleaseCondition, StatusHold, StatusReleased,
+            TimedStatus, TimedStatusPlugin, TimerStatusEffect, release_hold, tick_timed_status,
+        },
     };
 }
 
@@ -1325,10 +1331,10 @@ mod tests {
             .query::<(Entity, &StatusEffectObserverMarker)>()
             .iter(app.world())
         {
-            if let Some(name) = app.world().get::<Name>(entity) {
-                if name.as_str() == "MacroTestEffect_observer" {
-                    found_name = true;
-                }
+            if let Some(name) = app.world().get::<Name>(entity)
+                && name.as_str() == "MacroTestEffect_observer"
+            {
+                found_name = true;
             }
             let _ = marker; // Use the marker to avoid warning
         }
@@ -1539,6 +1545,7 @@ mod tests {
         let entity = Entity::from_raw_u32(42).unwrap();
 
         let original = ApplyStatusEffect { effect, entity };
+        #[allow(clippy::clone_on_copy)]
         let cloned = original.clone();
 
         assert_eq!(original.effect.0, cloned.effect.0);
@@ -1627,7 +1634,10 @@ mod tests {
         struct CustomEffect(f32);
 
         // Custom observer using On<T>
-        fn custom_observer(on: On<ApplyStatusEffect<CustomEffect>>, mut q: Query<&mut CustomValue>) {
+        fn custom_observer(
+            on: On<ApplyStatusEffect<CustomEffect>>,
+            mut q: Query<&mut CustomValue>,
+        ) {
             if let Ok(mut value) = q.get_mut(on.entity) {
                 value.0 += on.effect.0;
             }
