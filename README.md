@@ -18,7 +18,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-msg_status_effect = { git = "https://github.com/MolecularSadism/msg_status_effect", tag = "v0.4.0" }
+msg_status_effect = { git = "https://github.com/MolecularSadism/msg_status_effect", tag = "v0.5.0" }
 bevy = "0.18"
 ```
 
@@ -353,7 +353,10 @@ impl ValueModifier {
     fn percent_value(&self) -> f32;     // Get percent value (or 0)
     fn is_flat(&self) -> bool;
     fn is_percent(&self) -> bool;
-    fn scaled_by(&self, factor: f32) -> Self;
+    fn scaled_by(&self, factor: f32) -> Self;      // Scale Val and Percent
+    fn scaled_flat(&self, factor: f32) -> Self;    // Scale Val only; Percent unchanged
+    fn delta(&self, base: f32, power: f32) -> f32; // Signed additive change
+    fn apply_additive(&self, current: f32, power: f32) -> f32; // current + delta, floored at 0
 }
 ```
 
@@ -379,12 +382,20 @@ impl<C, E> StatusEffectPlugin<C, E> {
 
 | `msg_status_effect` | Bevy |
 |---------------------|------|
+| 0.5                 | 0.18 |
 | 0.4                 | 0.18 |
 | 0.3                 | 0.18 |
 | 0.2                 | 0.17 |
 | 0.1                 | 0.16 |
 
 ## Migration Guide
+
+### 0.4 → 0.5 (additive)
+
+**No breaking API changes.** 0.5 adds `ValueModifier::delta`, `apply_additive` and `scaled_flat`
+for additive arithmetic: `apply_additive` sums the change linearly with `power` and floors the
+result at zero, where `apply_scaled` combines through a power curve. Everything from 0.4 is
+unchanged.
 
 ### 0.3 → 0.4 (additive)
 
