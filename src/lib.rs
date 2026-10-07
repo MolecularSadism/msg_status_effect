@@ -271,6 +271,41 @@ impl ValueModifier {
             Self::Percent(p) => Self::Percent(p * factor),
         }
     }
+
+    /// Returns a new modifier with only a flat value scaled by `factor`.
+    ///
+    /// A percentage is unit-free and passes through unchanged, unlike
+    /// [`scaled_by`](Self::scaled_by).
+    #[inline]
+    #[must_use]
+    pub fn scaled_flat(&self, factor: f32) -> Self {
+        match self {
+            Self::Val(v) => Self::Val(v * factor),
+            Self::Percent(_) => *self,
+        }
+    }
+
+    /// Signed additive change at `power`.
+    ///
+    /// `Val(v)` is `v * power`; `Percent(p)` is `p` percent of `base` times `power`.
+    #[inline]
+    #[must_use]
+    pub fn delta(&self, base: f32, power: f32) -> f32 {
+        match self {
+            Self::Val(v) => v * power,
+            Self::Percent(p) => base * (p / 100.0) * power,
+        }
+    }
+
+    /// `current` plus [`delta`](Self::delta) measured against it, floored at zero.
+    ///
+    /// Additive counterpart of [`apply_scaled`](Self::apply_scaled): the change grows linearly
+    /// with `power` instead of combining through a power curve.
+    #[inline]
+    #[must_use]
+    pub fn apply_additive(&self, current: f32, power: f32) -> f32 {
+        (current + self.delta(current, power)).max(0.0)
+    }
 }
 
 impl Default for ValueModifier {
@@ -623,6 +658,40 @@ mod tests {
     // ============================================================================
     // ValueModifier Unit Tests
     // ============================================================================
+
+    #[test]
+    fn value_modifier_delta_val_ignores_base() {
+        assert_eq!(ValueModifier::Val(3.0).delta(40.0, 2.0), 6.0);
+        assert_eq!(ValueModifier::Val(3.0).delta(0.0, 2.0), 6.0);
+    }
+
+    #[test]
+    fn value_modifier_delta_percent_is_share_of_base() {
+        assert_eq!(ValueModifier::Percent(50.0).delta(40.0, 1.0), 20.0);
+        assert_eq!(ValueModifier::Percent(-50.0).delta(40.0, 2.0), -40.0);
+    }
+
+    #[test]
+    fn value_modifier_apply_additive_adds_delta() {
+        assert_eq!(ValueModifier::Val(5.0).apply_additive(10.0, 2.0), 20.0);
+        assert_eq!(ValueModifier::Percent(50.0).apply_additive(10.0, 1.0), 15.0);
+    }
+
+    #[test]
+    fn value_modifier_apply_additive_floors_at_zero() {
+        assert_eq!(ValueModifier::Val(-10.0).apply_additive(4.0, 1.0), 0.0);
+        assert_eq!(ValueModifier::Percent(-150.0).apply_additive(4.0, 1.0), 0.0);
+    }
+
+    #[test]
+    fn value_modifier_scaled_flat_leaves_percent_unchanged() {
+        let percent = ValueModifier::Percent(25.0);
+        assert_eq!(percent.scaled_flat(3.0), percent);
+        assert_eq!(
+            ValueModifier::Val(2.0).scaled_flat(3.0),
+            ValueModifier::Val(6.0)
+        );
+    }
 
     #[test]
     fn value_modifier_apply_linear() {
