@@ -29,11 +29,11 @@ use bevy::prelude::*;
 use msg_status_effect::prelude::*;
 
 // Define a component that will receive effects (must implement Default)
-#[derive(Component, Default)]
+#[derive(Component, Reflect, Default)]
 pub struct Speed(pub f32);
 
 // Define an effect type
-#[derive(Event, Clone, Copy)]
+#[derive(Event, Reflect, Clone, Copy)]
 pub struct SpeedModifier(pub ValueModifier);
 
 // Implement the applicator trait
@@ -227,7 +227,7 @@ use bevy::prelude::*;
 use msg_status_effect::prelude::*;
 use std::time::Duration;
 
-#[derive(Component)]
+#[derive(Component, Reflect)]
 struct Rooted(StatusHold);
 
 impl TimedStatus for Rooted {
@@ -259,7 +259,7 @@ use bevy::prelude::*;
 use msg_status_effect::prelude::*;
 use std::time::Duration;
 
-#[derive(Component)]
+#[derive(Component, Reflect)]
 struct Rooted(StatusHold);
 
 impl TimerStatusEffect for Rooted {
@@ -286,16 +286,16 @@ fn apply_resistance(mut commands: Commands, entity: Entity) {
 use bevy::prelude::*;
 use msg_status_effect::prelude::*;
 
-#[derive(Component, Default)]
+#[derive(Component, Reflect, Default)]
 struct Health { current: f32, max: f32 }
 
-#[derive(Component, Default)]
+#[derive(Component, Reflect, Default)]
 struct Speed(f32);
 
-#[derive(Event, Clone, Copy)]
+#[derive(Event, Reflect, Clone, Copy)]
 struct HealthModifier(ValueModifier);
 
-#[derive(Event, Clone, Copy)]
+#[derive(Event, Reflect, Clone, Copy)]
 struct SpeedModifier(ValueModifier);
 
 impl StatusEffectApplicator<Health> for HealthModifier {

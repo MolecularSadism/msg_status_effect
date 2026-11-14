@@ -37,6 +37,7 @@ use std::marker::PhantomData;
 use std::time::Duration;
 
 use bevy::prelude::*;
+use bevy::reflect::Reflectable;
 
 use crate::{
     ApplyStatusEffect, MutableComponent, StatusEffectApplication, StatusEffectApplicator,
@@ -251,7 +252,8 @@ pub trait TimedStatus: MutableComponent {
 /// This is the release seam: the module removes the component and announces
 /// the release; observers in the host decide what release *does* — restore
 /// the carried `previous_state`, replay an animation, nothing at all.
-#[derive(EntityEvent, Debug)]
+#[derive(EntityEvent, Reflect, Debug)]
+#[reflect(Event)]
 pub struct StatusReleased<C: TimedStatus> {
     /// The entity whose hold was released.
     pub entity: Entity,
@@ -339,8 +341,12 @@ impl<C: TimedStatus> Default for TimedStatusPlugin<C> {
     }
 }
 
-impl<C: TimedStatus> Plugin for TimedStatusPlugin<C> {
+impl<C: TimedStatus + TypePath> Plugin for TimedStatusPlugin<C>
+where
+    C::Restore: Reflectable + FromReflect,
+{
     fn build(&self, app: &mut App) {
+        app.register_type::<StatusReleased<C>>();
         app.add_systems(FixedUpdate, tick_timed_status::<C>);
     }
 }
@@ -386,7 +392,7 @@ pub trait TimerStatusEffect: MutableComponent {
 /// use bevy::prelude::*;
 /// use msg_status_effect::prelude::*;
 ///
-/// #[derive(Component)]
+/// #[derive(Component, Reflect)]
 /// struct Rooted(StatusHold);
 ///
 /// impl TimerStatusEffect for Rooted {
@@ -411,10 +417,12 @@ pub trait TimerStatusEffect: MutableComponent {
 ///     });
 /// }
 /// ```
-#[derive(Event)]
+#[derive(Event, Reflect)]
+#[reflect(Event)]
 pub struct DurationModifier<C: TimerStatusEffect> {
     /// How to change the timer's remaining duration.
     pub modifier: ValueModifier,
+    #[reflect(ignore)]
     _marker: PhantomData<C>,
 }
 
@@ -496,8 +504,11 @@ impl<C: TimerStatusEffect> DurationModifierPlugin<C> {
     }
 }
 
-impl<C: TimerStatusEffect> Plugin for DurationModifierPlugin<C> {
+impl<C: TimerStatusEffect + TypePath> Plugin for DurationModifierPlugin<C> {
     fn build(&self, app: &mut App) {
+        app.register_type::<DurationModifier<C>>();
+        app.register_type::<ApplyStatusEffect<DurationModifier<C>>>();
+        app.register_type::<StatusEffectApplication<C>>();
         app.insert_resource(StatusEffectApplication::<C>::with_power(self.config.power));
         app.add_observer(apply_duration_modifier::<C>);
     }
@@ -548,7 +559,7 @@ mod tests {
     /// Dummy hold component, standing in for a host's stun/snare.
     /// Deliberately neither `Default` nor `Clone`: the machinery must not
     /// require either.
-    #[derive(Component)]
+    #[derive(Component, Reflect)]
     struct Held(TestHold);
 
     impl TimedStatus for Held {

@@ -19,11 +19,11 @@
 //! use msg_status_effect::prelude::*;
 //!
 //! // Define a component that will receive effects (must implement Default)
-//! #[derive(Component, Default)]
+//! #[derive(Component, Reflect, Default)]
 //! pub struct Speed(pub f32);
 //!
 //! // Define an effect type
-//! #[derive(Event, Clone, Copy)]
+//! #[derive(Event, Reflect, Clone, Copy)]
 //! pub struct SpeedModifier(pub ValueModifier);
 //!
 //! // Implement the applicator trait
@@ -55,6 +55,7 @@ use std::marker::PhantomData;
 use bevy::ecs::component::Mutable;
 use bevy::ecs::observer::On;
 use bevy::prelude::*;
+use bevy::reflect::Reflectable;
 use serde::{Deserialize, Serialize};
 
 pub mod timed;
@@ -328,7 +329,7 @@ impl<C: Component<Mutability = Mutable>> MutableComponent for C {}
 /// use bevy::prelude::*;
 /// use msg_status_effect::prelude::*;
 ///
-/// #[derive(Component)]
+/// #[derive(Component, Reflect)]
 /// struct Health(f32);
 ///
 /// // Linear scaling (default)
@@ -343,11 +344,13 @@ impl<C: Component<Mutability = Mutable>> MutableComponent for C {}
 /// let config = StatusEffectApplication::<Health>::with_power(0.7);
 /// assert!((config.power - 0.7).abs() < 0.001);
 /// ```
-#[derive(Resource)]
+#[derive(Resource, Reflect)]
+#[reflect(Resource)]
 pub struct StatusEffectApplication<C: MutableComponent> {
     /// Power scaling for effect application
     pub power: f32,
     /// Phantom data for the component type
+    #[reflect(ignore)]
     _marker: PhantomData<C>,
 }
 
@@ -405,10 +408,10 @@ impl<C: MutableComponent> StatusEffectApplication<C> {
 /// use bevy::prelude::*;
 /// use msg_status_effect::prelude::*;
 ///
-/// #[derive(Component)]
+/// #[derive(Component, Reflect)]
 /// struct Speed(f32);
 ///
-/// #[derive(Event, Clone, Copy)]
+/// #[derive(Event, Reflect, Clone, Copy)]
 /// struct SpeedModifier(ValueModifier);
 ///
 /// impl StatusEffectApplicator<Speed> for SpeedModifier {
@@ -446,7 +449,7 @@ pub trait StatusEffectApplicator<C: MutableComponent>: Event + Clone {
 /// use bevy::prelude::*;
 /// use msg_status_effect::prelude::*;
 ///
-/// #[derive(Event, Clone, Copy)]
+/// #[derive(Event, Reflect, Clone, Copy)]
 /// struct SpeedModifier(ValueModifier);
 ///
 /// // In a system, you would trigger it like this:
@@ -457,7 +460,8 @@ pub trait StatusEffectApplicator<C: MutableComponent>: Event + Clone {
 ///     });
 /// }
 /// ```
-#[derive(EntityEvent, Clone, Copy)]
+#[derive(EntityEvent, Reflect, Clone, Copy)]
+#[reflect(Event)]
 pub struct ApplyStatusEffect<E: Event + Clone> {
     /// The effect to apply
     pub effect: E,
@@ -501,10 +505,10 @@ fn apply_status_effect_observer<C, E>(
 /// use msg_status_effect::prelude::*;
 ///
 /// // Define component and effect (component must implement Default)
-/// #[derive(Component, Default)]
+/// #[derive(Component, Reflect, Default)]
 /// struct Speed(f32);
 ///
-/// #[derive(Event, Clone, Copy)]
+/// #[derive(Event, Reflect, Clone, Copy)]
 /// struct SpeedModifier(ValueModifier);
 ///
 /// impl StatusEffectApplicator<Speed> for SpeedModifier {
@@ -568,10 +572,12 @@ where
 
 impl<C, E> Plugin for StatusEffectPlugin<C, E>
 where
-    C: MutableComponent + Default,
-    E: Event + Clone + StatusEffectApplicator<C>,
+    C: MutableComponent + Default + TypePath,
+    E: Event + Clone + StatusEffectApplicator<C> + Reflectable + FromReflect,
 {
     fn build(&self, app: &mut App) {
+        app.register_type::<StatusEffectApplication<C>>();
+        app.register_type::<ApplyStatusEffect<E>>();
         app.insert_resource(StatusEffectApplication::<C> {
             power: self.config.power,
             _marker: PhantomData,
@@ -600,10 +606,10 @@ pub struct StatusEffectObserverMarker;
 /// use msg_status_effect::prelude::*;
 ///
 /// // Define a component and effect type
-/// #[derive(Component)]
+/// #[derive(Component, Reflect)]
 /// struct Speed(f32);
 ///
-/// #[derive(Event, Clone, Copy)]
+/// #[derive(Event, Reflect, Clone, Copy)]
 /// struct SpeedModifier(ValueModifier);
 ///
 /// impl StatusEffectApplicator<Speed> for SpeedModifier {
@@ -773,7 +779,7 @@ mod tests {
 
     #[test]
     fn status_effect_application_presets() {
-        #[derive(Component)]
+        #[derive(Component, Reflect)]
         struct TestComponent;
 
         let linear = StatusEffectApplication::<TestComponent>::linear();
@@ -945,7 +951,7 @@ mod tests {
 
     #[test]
     fn status_effect_application_default() {
-        #[derive(Component)]
+        #[derive(Component, Reflect)]
         struct TestComponent;
 
         let default = StatusEffectApplication::<TestComponent>::default();
@@ -957,7 +963,7 @@ mod tests {
     // ============================================================================
 
     /// Test component for integration tests
-    #[derive(Component, Default)]
+    #[derive(Component, Reflect, Default)]
     struct TestSpeed {
         value: f32,
     }
@@ -969,7 +975,7 @@ mod tests {
     }
 
     /// Test effect for modifying TestSpeed
-    #[derive(Event, Clone, Copy)]
+    #[derive(Event, Reflect, Clone, Copy)]
     struct TestSpeedEffect(ValueModifier);
 
     impl StatusEffectApplicator<TestSpeed> for TestSpeedEffect {
@@ -1202,7 +1208,7 @@ mod tests {
     #[test]
     fn integration_auto_insert_with_custom_default() {
         /// Component with non-zero default for testing
-        #[derive(Component)]
+        #[derive(Component, Reflect)]
         struct TestArmor {
             value: f32,
         }
@@ -1213,7 +1219,7 @@ mod tests {
             }
         }
 
-        #[derive(Event, Clone, Copy)]
+        #[derive(Event, Reflect, Clone, Copy)]
         struct TestArmorEffect(ValueModifier);
 
         impl StatusEffectApplicator<TestArmor> for TestArmorEffect {
@@ -1252,7 +1258,7 @@ mod tests {
     // ============================================================================
 
     /// Second test component for multi-type tests
-    #[derive(Component, Default)]
+    #[derive(Component, Reflect, Default)]
     struct TestHealth {
         current: f32,
         max: f32,
@@ -1265,7 +1271,7 @@ mod tests {
     }
 
     /// Effect for TestHealth
-    #[derive(Event, Clone, Copy)]
+    #[derive(Event, Reflect, Clone, Copy)]
     struct TestHealthEffect(ValueModifier);
 
     impl StatusEffectApplicator<TestHealth> for TestHealthEffect {
@@ -1326,13 +1332,13 @@ mod tests {
     // ============================================================================
 
     /// Component for macro tests
-    #[derive(Component)]
+    #[derive(Component, Reflect)]
     struct MacroTestComponent {
         value: f32,
     }
 
     /// Effect type for macro tests
-    #[derive(Event, Clone, Copy)]
+    #[derive(Event, Reflect, Clone, Copy)]
     struct MacroTestEffect(ValueModifier);
 
     /// Custom observer function for macro tests
@@ -1696,10 +1702,10 @@ mod tests {
         app.add_plugins(MinimalPlugins);
 
         // Define a custom component for this test
-        #[derive(Component)]
+        #[derive(Component, Reflect)]
         struct CustomValue(f32);
 
-        #[derive(Event, Clone, Copy)]
+        #[derive(Event, Reflect, Clone, Copy)]
         struct CustomEffect(f32);
 
         // Custom observer using On<T>
