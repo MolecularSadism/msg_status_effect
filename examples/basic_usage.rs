@@ -17,7 +17,7 @@ use msg_status_effect::prelude::*;
 
 /// A simple speed component representing movement speed.
 /// Must implement Default for auto-insertion behavior.
-#[derive(Component, Default)]
+#[derive(Component, Reflect, Default)]
 pub struct Speed {
     pub value: f32,
 }
@@ -30,7 +30,7 @@ impl Speed {
 
 /// A health component with current and maximum values.
 /// The effect will preserve the current/max ratio when modifying max health.
-#[derive(Component)]
+#[derive(Component, Reflect)]
 pub struct Health {
     pub current: f32,
     pub max: f32,
@@ -56,7 +56,7 @@ impl Health {
 // ============================================================================
 
 /// Effect that modifies the Speed component.
-#[derive(Event, Clone, Copy)]
+#[derive(Event, Reflect, Clone, Copy)]
 pub struct SpeedModifier(pub ValueModifier);
 
 impl StatusEffectApplicator<Speed> for SpeedModifier {
@@ -71,7 +71,7 @@ impl StatusEffectApplicator<Speed> for SpeedModifier {
 
 /// Effect that modifies the Health component.
 /// This example preserves the current/max health ratio when modifying max health.
-#[derive(Event, Clone, Copy)]
+#[derive(Event, Reflect, Clone, Copy)]
 pub struct MaxHealthModifier(pub ValueModifier);
 
 impl StatusEffectApplicator<Health> for MaxHealthModifier {
@@ -114,7 +114,7 @@ fn main() {
 }
 
 /// Marker component to track our demo entity
-#[derive(Component)]
+#[derive(Component, Reflect)]
 struct Player;
 
 /// Counter to track demo progression
